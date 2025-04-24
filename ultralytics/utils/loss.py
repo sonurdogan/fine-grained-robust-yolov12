@@ -11,7 +11,8 @@ from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
-
+import pandas as pd
+import random
 
 class VarifocalLoss(nn.Module):
     """
@@ -244,7 +245,44 @@ class v8DetectionLoss:
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        df = pd.read_csv('image_cluster.csv')  # image_path, cluster
+
+        batch_image_paths = batch['im_file']  # List[str] of image paths
+        subset = df[df['image_path'].isin(batch_image_paths)]
+
+        subset = subset.set_index('image_path').reindex(batch_image_paths).reset_index()
+
+        cluster_map = dict(zip(subset['image_path'], subset['cluster']))
+        #get unique clusters
+        unique_clusters = subset['cluster'].unique()
+
+        # BCE loss per example
+        indv_loss = self.bce(pred_scores, target_scores.to(dtype))
+
+        # Dictionary to store loss per group
+        group_losses = {}
+        #per_sample_loss = indv_loss.sum(dim=(1, 2))
+        for cluster in unique_clusters:
+            # Get indices of examples in this cluster
+            cluster_indices = subset[subset['cluster'] == cluster].index.tolist()
+
+            # Gather their individual losses
+            cluster_loss = indv_loss[cluster_indices].sum()
+            target_scores_sum_cluster = target_scores[cluster_indices].sum()
+
+            # Normalize if desired (e.g., by count)
+            normalized_loss = cluster_loss / target_scores_sum_cluster
+            
+            #normalized_loss = per_sample_loss[cluster_indices].mean()
+            group_losses[cluster] = normalized_loss.item()  # Convert to scalar if needed
+
+        # Example: get max group loss for Group DRO
+        group_dro_loss = max(group_losses.values())
+        
+        old_loss = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        print("group_dro_loss:", group_dro_loss)
+        print("old_loss[1]:", old_loss)
+        loss[1] = group_dro_loss
 
         # Bbox loss
         if fg_mask.sum():
